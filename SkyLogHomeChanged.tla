@@ -10,7 +10,8 @@ EXTENDS Naturals, TLC
 
 CONSTANTS Clients, Records, FaultMode
 
-ASSUME FaultMode \in {"Good", "SkipDrain", "SkipDup", "AllowLateAck"}
+ASSUME FaultMode \in
+  {"Good", "SkipDrain", "SkipDup", "SkipFinalWait", "AllowLateAck"}
 
 O == "O"
 N == "N"
@@ -69,7 +70,7 @@ Begin ==
 \* A client may issue only under a live session and its cached configuration.
 Issue(c, r) ==
   /\ c \in Clients /\ r \in Records
-  /\ phase \in {"fuzzy", "duped", "done"}
+  /\ phase \in {"fuzzy", "duped", "marker", "finalizing", "done"}
   /\ lease[c] = "live"
   /\ reqState[c] = "idle"
   /\ r \notin issued
@@ -93,10 +94,12 @@ Deliver(c) ==
   /\ posN' = [posN EXCEPT
         ![pending[c]] = IF N \in ConfigHomes(issueCfg[c]) THEN nextN ELSE @]
   /\ logicalPos' = [logicalPos EXCEPT
-        ![pending[c]] = IF installed THEN nextLogical ELSE nextO]
+        ![pending[c]] = IF phase \in {"marker", "finalizing", "done"}
+                         THEN nextLogical ELSE nextO]
   /\ nextO' = IF O \in ConfigHomes(issueCfg[c]) THEN nextO + 1 ELSE nextO
   /\ nextN' = IF N \in ConfigHomes(issueCfg[c]) THEN nextN + 1 ELSE nextN
-  /\ nextLogical' = IF installed THEN nextLogical + 1 ELSE nextLogical
+  /\ nextLogical' = IF phase \in {"marker", "finalizing", "done"}
+                    THEN nextLogical + 1 ELSE nextLogical
   /\ reqState' = [reqState EXCEPT ![c] = "durable"]
   /\ UNCHANGED << phase, proposal, installed, cutover,
                  clientCfg, clientAck, lease,
@@ -131,6 +134,7 @@ DropLateCompletion(c) ==
 SwitchClient(c) ==
   /\ c \in Clients
   /\ phase = "fuzzy"
+  /\ proposal = "duped"
   /\ lease[c] = "live"
   /\ clientCfg[c] = "old"
   /\ NoOutstanding(c) \/ FaultMode = "SkipDrain"
@@ -156,38 +160,63 @@ FinishDup ==
   /\ phase = "fuzzy"
   /\ AllClientsDone
   /\ phase' = "duped"
-  /\ proposal' = "final"
+  /\ proposal' = "none"
   /\ UNCHANGED << installed, cutover,
                  clientCfg, clientAck, lease,
                  pending, issueCfg, reqState, issued, appAcked, discarded,
                  posO, posN, logicalPos, nextO, nextN, nextLogical >>
 
-\* §4.3.2 stage 2: append the O marker and retain its position as p. The marker
-\* is intentionally not an application record; no configuration-store mapping
-\* is represented in this reduced state machine.
-InstallHomeMove ==
+\* §4.3.2 stage 2: append the O marker and retain its position as p.  The
+\* marker is not an application record.  The persistent mapping itself is
+\* abstracted by installed and cutover.
+PlaceMarker ==
   /\ phase = "duped" \/ (FaultMode = "SkipDup" /\ phase = "fuzzy")
-  /\ phase' = "done"
-  /\ proposal' = "none"
-  /\ installed' = TRUE
+  /\ phase' = "marker"
   /\ cutover' = nextO
   /\ nextO' = nextO + 1
   /\ nextLogical' = nextO + 1
-  /\ UNCHANGED << clientCfg, clientAck, lease,
+  /\ UNCHANGED << proposal, installed, clientCfg, clientAck, lease,
                  pending, issueCfg, reqState, issued, appAcked, discarded,
                  posO, posN, logicalPos, nextN >>
 
-\* After the cutover, an active client can stop writing to O.  The drain guard
-\* preserves the §4.3.1 client-switch discipline for this final transition.
+\* After placing the marker, record the final <N> proposal and begin a fresh
+\* acknowledgment epoch.  Acknowledgments from the initial dup cannot satisfy
+\* this second wait.
+ProposeFinal ==
+  /\ phase = "marker"
+  /\ phase' = "finalizing"
+  /\ proposal' = "final"
+  /\ clientAck' = [c \in Clients |-> FALSE]
+  /\ UNCHANGED << installed, cutover, clientCfg, lease,
+                 pending, issueCfg, reqState, issued, appAcked, discarded,
+                 posO, posN, logicalPos, nextO, nextN, nextLogical >>
+
+\* Each live client drains requests issued under <O,N>, switches to <N>, and
+\* acknowledges the final proposal.  Expired clients are covered by the lease
+\* side of AllClientsDone.
 MoveClientToFinal(c) ==
   /\ c \in Clients
-  /\ phase = "done"
+  /\ phase = "finalizing"
+  /\ proposal = "final"
   /\ lease[c] = "live"
   /\ clientCfg[c] = "duped"
   /\ NoOutstanding(c)
   /\ clientCfg' = [clientCfg EXCEPT ![c] = "final"]
+  /\ clientAck' = [clientAck EXCEPT ![c] = TRUE]
   /\ UNCHANGED << phase, proposal, installed, cutover,
-                 clientAck, lease,
+                 lease,
+                 pending, issueCfg, reqState, issued, appAcked, discarded,
+                 posO, posN, logicalPos, nextO, nextN, nextLogical >>
+
+\* Install p+1 -> <N> only after every client has acknowledged the second
+\* proposal or its lease has expired.
+InstallHomeMove ==
+  /\ phase = "finalizing"
+  /\ AllClientsDone \/ FaultMode = "SkipFinalWait"
+  /\ phase' = "done"
+  /\ proposal' = "none"
+  /\ installed' = TRUE
+  /\ UNCHANGED << cutover, clientCfg, clientAck, lease,
                  pending, issueCfg, reqState, issued, appAcked, discarded,
                  posO, posN, logicalPos, nextO, nextN, nextLogical >>
 
@@ -207,12 +236,14 @@ Next ==
   \/ \E c \in Clients : SwitchClient(c)
   \/ \E c \in Clients : Expire(c)
   \/ FinishDup
-  \/ InstallHomeMove
+  \/ PlaceMarker
+  \/ ProposeFinal
   \/ \E c \in Clients : MoveClientToFinal(c)
+  \/ InstallHomeMove
   \/ Done
 
 TypeOK ==
-  /\ phase \in {"idle", "fuzzy", "duped", "done"}
+  /\ phase \in {"idle", "fuzzy", "duped", "marker", "finalizing", "done"}
   /\ proposal \in {"none", "duped", "final"}
   /\ installed \in BOOLEAN
   /\ cutover \in Nat
@@ -239,7 +270,7 @@ AcknowledgedDurable ==
 MappingVisibility ==
   \A r \in appAcked :
     /\ logicalPos[r] > 0
-    /\ IF installed /\ logicalPos[r] > cutover
+    /\ IF cutover > 0 /\ logicalPos[r] > cutover
        THEN posN[r] > 0
        ELSE posO[r] > 0
 
@@ -250,14 +281,21 @@ UniqueLogicalOrder ==
 \* No active client remains on the O-only view once the controller is allowed
 \* to choose the home-move marker.
 HomeMoveRequiresCompletedDup ==
-  phase \in {"duped", "done"} =>
+  phase \in {"duped", "marker", "finalizing", "done"} =>
+    \A c \in Clients : lease[c] = "expired" \/ clientCfg[c] # "old"
+
+\* Installing the final mapping requires a fresh response to the final
+\* proposal from every live client; initial-dup acknowledgments were reset.
+FinalInstallRequiresClientSwitch ==
+  installed =>
+    /\ phase = "done"
     /\ AllClientsDone
-    /\ \A c \in Clients : lease[c] = "live" => clientCfg[c] # "old"
+    /\ \A c \in Clients : lease[c] = "live" => clientCfg[c] = "final"
 
 \* This is the central late-request safety obligation in the paper's sketch.
 NoOldOnlyAcknowledgmentAfterCutover ==
   \A r \in appAcked :
-    ~(installed /\ posO[r] > cutover /\ posN[r] = 0)
+    ~(cutover > 0 /\ posO[r] > cutover /\ posN[r] = 0)
 
 \* Under weak fairness, a started reconfiguration cannot remain fuzzy forever:
 \* active clients switch or expire, and the controller then completes it.
@@ -268,11 +306,16 @@ Fairness ==
   /\ \A c \in Clients : WF_vars(ReportSuccess(c))
   /\ \A c \in Clients : WF_vars(DropLateCompletion(c))
   /\ WF_vars(FinishDup)
+  /\ WF_vars(PlaceMarker)
+  /\ WF_vars(ProposeFinal)
+  /\ \A c \in Clients : WF_vars(MoveClientToFinal(c))
   /\ WF_vars(InstallHomeMove)
 
 Progress ==
-  /\ (phase = "fuzzy") ~> (phase # "fuzzy")
-  /\ (phase = "duped") ~> (phase = "done")
+  /\ (phase = "fuzzy") ~> (phase = "duped")
+  /\ (phase = "duped") ~> (phase = "marker")
+  /\ (phase = "marker") ~> (phase = "finalizing")
+  /\ (phase = "finalizing") ~> (phase = "done")
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 

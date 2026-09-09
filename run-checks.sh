@@ -26,4 +26,5 @@ run_fail() {
 
 run_fail MutationSkipDrain.cfg
 run_fail MutationSkipDup.cfg
+run_fail MutationSkipFinalWait.cfg
 run_fail MutationLateAck.cfg

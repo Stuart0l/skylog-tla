@@ -13,9 +13,9 @@ connect the models.
 | 2. Home unchanged | `SkyLogHomeUnchanged.tla` | `HomeUnchanged.cfg` | A bounded fuzzy-reconfiguration state machine and progress check; it has no reader or cached mapping. |
 | 3. Home changed | `SkyLogHomeChanged.tla` | `HomeChanged.cfg` | A bounded dup-then-switch state machine: marker installation and acknowledged-append visibility only. |
 
-`MutationSkipDrain.cfg`, `MutationSkipDup.cfg`, and `MutationLateAck.cfg`
-run against `SkyLogHomeChanged.tla`.  They deliberately break one essential
-protocol rule each and must fail.
+`MutationSkipDrain.cfg`, `MutationSkipDup.cfg`, `MutationSkipFinalWait.cfg`,
+and `MutationLateAck.cfg` run against `SkyLogHomeChanged.tla`. They
+deliberately break one essential protocol rule each and must fail.
 
 ## 1. Data path: payload, metadata, and readers
 
@@ -52,7 +52,9 @@ Model: `SkyLogHomeChanged.tla`, a dedicated §4.3.2 state machine.
 | --- | --- | --- |
 | §4.3.2 begins by adding new home `N` as a mirror | each live client enters `"duped"`, whose targets are `{O, N}` | `HomeMoveRequiresCompletedDup`. |
 | Controller completes the staged fuzzy dup only after acknowledgment or expiry | `AllClientsDone` guards `FinishDup` | `HomeMoveRequiresCompletedDup`; `MutationSkipDup.cfg` violates it. |
-| Insert an old-home marker, call its position `p`, and install `p+1... -> N` | `InstallHomeMove` reserves `nextO` as `cutover` | only the marker boundary is represented. The persistent mapping installation and reader interpretation are omitted. |
+| Insert an old-home marker and call its position `p` | `PlaceMarker` reserves `nextO` as `cutover`, before the final proposal | the marker is a control-plane boundary, not an application record. |
+| Propose `<N>` only after the marker and use fresh client responses | `ProposeFinal` enters `"finalizing"` and resets every `clientAck`; `MoveClientToFinal` drains `<O,N>` requests before acknowledging | all second-round client-switch interleavings are explored. |
+| Install `p+1... -> <N>` only after every fresh acknowledgment or lease expiry | `AllClientsDone` guards `InstallHomeMove` | `FinalInstallRequiresClientSwitch`; `MutationSkipFinalWait.cfg` violates it. The persistent mapping value itself is abstracted by `installed` and `cutover`. |
 | A client that drains old requests can no longer issue an old-only request after it joins the dup | `SwitchClient`, `issueCfg`, and `ConfigHomes` | `MutationSkipDrain.cfg` violates `MappingVisibility`. |
 | An expired client cannot make a delayed old-only append visible after the cutover | `DropLateCompletion` suppresses its completion | `NoOldOnlyAcknowledgmentAfterCutover`; `MutationLateAck.cfg` violates `MappingVisibility`. |
 | Logical order remains unique and every acknowledged append remains visible at the marker-implied home | `logicalPos`, `posO`, `posN`, and `cutover` | `UniqueLogicalOrder`, `MappingVisibility`, `AcknowledgedDurable`. This is not the N-reader dedup-and-renumber algorithm. |
