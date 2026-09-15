@@ -18,10 +18,6 @@ a new cloud using the *dup-then-switch* method. It contains the controller and a
 procedures during the reconfiguration, as well as the consumer protocol on how to read across
 the switch boundary.
 
-[ProtocolMapping.md](ProtocolMapping.md) maps every material
-paper rule to a state transition or invariant, and names every deliberate
-abstraction.
-
 ## Files
 
 - `DataPath.cfg`, `HomeUnchanged.cfg`, and `HomeChanged.cfg`: the exhaustive
