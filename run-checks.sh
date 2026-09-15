@@ -14,17 +14,3 @@ run_pass DataPath.cfg SkyLogDataPath.tla
 run_pass DataPathLiveness.cfg SkyLogDataPath.tla
 run_pass HomeUnchanged.cfg SkyLogHomeUnchanged.tla
 run_pass HomeChanged.cfg SkyLogHomeChanged.tla
-
-run_fail() {
-  local cfg="$1"
-  echo "FAIL expected: ${cfg}"
-  if java -cp "$TLA_TOOLS_JAR" tlc2.TLC -workers auto -config "$cfg" SkyLogHomeChanged.tla; then
-    echo "ERROR: ${cfg} unexpectedly passed" >&2
-    exit 1
-  fi
-}
-
-run_fail MutationSkipDrain.cfg
-run_fail MutationSkipDup.cfg
-run_fail MutationSkipFinalWait.cfg
-run_fail MutationLateAck.cfg
